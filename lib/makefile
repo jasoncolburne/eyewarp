@@ -7,13 +7,13 @@
 
 RUMPATH := ../redrum
 
-STATICLIBS := eyewarp_plasma  \
-              eyewarp_crypt
+STATICLIBS := ewplasma  \
+              ewcrypt
 
 # define module directories to source objects from when building
 # the above libs
-eyewarp_plasma := src/plasma
-eyewarp_crypt  := src/crypt
+ewplasma := src/plasma
+ewcrypt  := src/crypt
 
 include $(RUMPATH)/target.mk
 include $(RUMPATH)/lib.mk
