@@ -5,6 +5,6 @@
 #
 # $Id: makefile 21 2010-04-28 17:38:52Z jason $
 
-LIBS := red ewplasma
+LIBS := red eyewarp
 
 include ../src.mk
