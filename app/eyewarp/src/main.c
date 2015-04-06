@@ -1,4 +1,4 @@
-/* Copyright (C) 2010, Redbeard Enterprises Ltd.
+/* Copyright (C) 2015, Redbeard Enterprises Ltd.
  *
  * Not to be used in any form without express written consent.
  * All rights reserved.
@@ -43,9 +43,13 @@
 #include "he_context.h"
 
 /* local headers */
-#include "plasma.h"
+#include "eyewarp.h"
+#include "fractal.h"
+#include "red_audio.h"
+#include "video_filter.h"
+#include "colormaps.h"
 
-#define STREAM_DURATION   15.0 /* seconds */
+#define STREAM_DURATION   167 /* seconds */
 #define STREAM_FRAME_RATE 30
 #define STREAM_NB_FRAMES  ((int)(STREAM_DURATION * STREAM_FRAME_RATE))
 #define STREAM_PIX_FMT    AV_PIX_FMT_YUV420P /* default pix_fmt */
@@ -76,15 +80,18 @@ static void add_audio_stream(OutputStream *ost, AVFormatContext *oc,
   int ret;
   /* find the audio encoder */
   codec = avcodec_find_encoder(codec_id);
+
   if (!codec) {
     fprintf(stderr, "codec not found\n");
     exit(1);
   }
+
   ost->st = avformat_new_stream(oc, codec);
   if (!ost->st) {
     fprintf(stderr, "Could not alloc stream\n");
     exit(1);
   }
+
   c = ost->st->codec;
   /* put sample parameters */
   c->sample_fmt     = codec->sample_fmts           ? codec->sample_fmts[0]           : AV_SAMPLE_FMT_S16;
@@ -92,6 +99,8 @@ static void add_audio_stream(OutputStream *ost, AVFormatContext *oc,
   c->channel_layout = codec->channel_layouts       ? codec->channel_layouts[0]       : AV_CH_LAYOUT_STEREO;
   c->channels       = av_get_channel_layout_nb_channels(c->channel_layout);
   c->bit_rate       = 64000;
+  /* allow acc and other experimental codecs */
+  c->strict_std_compliance = -2;
     
   ost->st->time_base = (AVRational){ 1, c->sample_rate };
   // some formats want stream headers to be separate
@@ -173,32 +182,47 @@ static void open_audio(AVFormatContext *oc, OutputStream *ost)
 				     44100, nb_samples);
 }
 
+static red_u8 buf324[133000] = {0};
+static red_u8 buf458[133000] = {0};
+
 /* Prepare a 16 bit dummy audio frame of 'frame_size' samples and
  * 'nb_channels' channels. */
-static AVFrame *get_audio_frame(OutputStream *ost)
+static 
+AVFrame*
+get_audio_frame(
+		/* input streams, */
+    RedAudioCombiningContext acCtx,
+    OutputStream*            ost
+    )
 {
   AVFrame *frame = ost->tmp_frame;
-  int j, i, v;
-  int16_t *q = (int16_t*)frame->data[0];
+  void* sources[2] = { (void*)buf324, (void*)buf458 };
+
   /* check if we want to generate more frames */
   if (av_compare_ts(ost->next_pts, ost->st->codec->time_base,
 		    STREAM_DURATION, (AVRational){ 1, 1 }) >= 0)
     return NULL;
-  for (j = 0; j < frame->nb_samples; j++) {
-    v = (int)(sin(ost->t) * 10000);
-    for (i = 0; i < ost->st->codec->channels; i++)
-      *q++ = v;
-    ost->t     += ost->tincr;
-    ost->tincr += ost->tincr2;
-  }
+
+  /*
+  redAudioCombineFrames(sources, 2, (void*)frame->data[0], frame->nb_samples, acCtx);
+  */
+  memset(frame->data[0], frame->nb_samples, 2);
+
+  sources[0]= sources[1];
+
   return frame;
 }
 
 /* if a frame is provided, send it to the encoder, otherwise flush the encoder;
  * return 1 when encoding is finished, 0 otherwise
  */
-static int encode_audio_frame(AVFormatContext *oc, OutputStream *ost,
-                              AVFrame *frame)
+static
+int 
+encode_audio_frame(
+    AVFormatContext* oc,
+    OutputStream*    ost,
+    AVFrame*         frame
+    )
 {
   AVPacket pkt = { 0 }; // data and size must be 0;
   int got_packet;
@@ -220,13 +244,23 @@ static int encode_audio_frame(AVFormatContext *oc, OutputStream *ost,
  * encode one audio frame and send it to the muxer
  * return 1 when encoding is finished, 0 otherwise
  */
-static int process_audio_stream(AVFormatContext *oc, OutputStream *ost)
+static
+int
+process_audio_stream(
+    RedAudioCombiningContext acCtx,
+    AVFormatContext*         oc, 
+    OutputStream*            ost
+    )
 {
   AVFrame *frame;
+
   int got_output = 0;
   int ret;
-  frame = get_audio_frame(ost);
+
+  frame = get_audio_frame(acCtx, ost);
+
   got_output |= !!frame;
+
   /* feed the data to lavr */
   if (frame) {
     ret = avresample_convert(ost->avr, NULL, 0, 0,
@@ -275,16 +309,8 @@ static int process_audio_stream(AVFormatContext *oc, OutputStream *ost)
 
 /**************************************************************/
 /* video output */
-#define VWIDTH  600
-#define VHEIGHT 600
 
 #define SOURCE_FMT AV_PIX_FMT_PAL8
-
-#define PLASMA_DIMENSIONS 1025
-#define PLASMA_GRAIN 1.0/*2.3*/
-
-static uint8_t plasma[2049*2049];
-static uint8_t plasma_palette[2048];
 
 /* Add a video output stream. */
 
@@ -306,16 +332,19 @@ static void add_video_stream(OutputStream *ost, AVFormatContext *oc,
   }
   c = ost->st->codec;
   /* Put sample parameters. */
-  c->bit_rate = 800000;/*4400000; 600000; */
+  c->bit_rate = 4200000;/* 600000; */
   /* Resolution must be a multiple of two. */
-  c->width    = VWIDTH;
-  c->height   = VHEIGHT;
+  c->width    = VIDEO_WIDTH;
+  c->height   = VIDEO_HEIGHT;
   /* timebase: This is the fundamental unit of time (in seconds) in terms
    * of which frame timestamps are represented. For fixed-fps content,
    * timebase should be 1/framerate and timestamp increments should be
    * identical to 1. */
-  ost->st->time_base = (AVRational){ 1, STREAM_FRAME_RATE };
-  c->time_base       = ost->st->time_base;
+  ost->st->time_base = (AVRational){ 1001, 30000 }; /*STREAM_FRAME_RATE };*/
+  /*
+  ost->st->sample_aspect_ratio = (AVRational){ 654, 720 };
+  */
+  c->time_base     = ost->st->time_base;
   c->gop_size      = 12; /* emit one intra frame every twelve frames at most */
   c->pix_fmt       = STREAM_PIX_FMT;
   if (c->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
@@ -351,109 +380,75 @@ static AVFrame *alloc_picture(enum AVPixelFormat pix_fmt, int width, int height)
   return picture;
 }
 
-
-static void copyPalette(uint8_t* dst, int offset) {
-  uint32_t* src = (uint32_t*)plasma_palette;
-  memcpy(dst, src + offset, 1024);
-}
-
-#define SEED_COUNT 3
-static void initializePlasma(void)
+int
+advancePlasma(
+    RedVideoFilter filter
+    )
 {
-  int rc = RED_SUCCESS;
-/*
-  RedContext rCtx = NULL;
-*/
+  if (!filter)
+    return RED_ERR_NULL_CONTEXT;
 
-#if 0
-  uint32_t seed = 1423196991; /*   800x450 (1025) */
-  uint32_t seed = 1423206413; /* 1920x1080 (2049) */
-  uint32_t seed = time(NULL);
-#else
-  uint32_t seed = 1423206413; /* 1920x1080 (2049) */
-#endif
-  printf("seed: %u\r\n", seed);
+  RedPlasmaFilterData data = (RedPlasmaFilterData)(filter->data);
 
-  // ARGB
-  uint32_t seed_colors[SEED_COUNT] = {
-    0xFF881084,
-    0xFF648B24,
-    0xFF0CA890
-  };
-  
-  uint8_t seed_positions[SEED_COUNT] = { 
-    0, 
-    85, 
-    170 
-  };
+  data->palette_offset += 1.0;
+  if (data->palette_offset > 255)
+    data->palette_offset = 0.0;
 
-/*
-  rc = redContextCreateDefault(&rCtx);
-  if (rc != RED_SUCCESS) exit(rc);
-*/
-
-  rc = conjureGradientPalette(plasma_palette, seed_colors, 
-			       seed_positions, SEED_COUNT);
-  if (rc != RED_SUCCESS) exit(rc);
-
-  /* TODO: copy the plasma layer in two dimensions so we can pan */  
-
-  /* duplicate the palette for easier rotation */
-  copyPalette(&plasma_palette[1024], 0);
-  
-  rc = conjurePlasmaSurface(plasma, PLASMA_DIMENSIONS, PLASMA_DIMENSIONS, PLASMA_GRAIN, seed);
-  if (rc != RED_SUCCESS) exit(rc);
+  return RED_SUCCESS;
 }
 
-/* Render image. */
-static uint8_t  palette_offset   = 0;
-/*
-static uint16_t pox = 0;
-static uint16_t poy = 0;
-static float    pvx = 0;
-static float    pvx = 0;
-*/
-static void fill_rgb_image(AVFrame *pict, int frame_index,
-                           int width, int height)
+static
+int
+fill_rgb_image(
+    AVFrame*       pict,
+    RedVideoFilter filter
+    )
 {
   int rc = RED_SUCCESS;
 
-  int i;
-  uint8_t  *s, *d;
-  /*
-  uint16_t xr, yr;
-  */
   /* when we pass a frame to the encoder, it may keep a reference to it
    * internally; make sure we do not overwrite it here
    */
   rc = av_frame_make_writable(pict);
-  if (rc < 0)
-    exit(1);
+  if (rc < 0) {
+    fprintf(stderr, "av error: %08x\r\n", rc);
+    rc = 1; /* TODO: RED_ERR_DEPENDENCY */
+    goto end;
+  }
 
+#if 0
   /* todo: add support for moving the plasma */
+  int i;
+  uint8_t  *s, *d;
+
   for (i = 0; i < height; i++) {
     d = pict->data[0] + i * pict->linesize[0];
     s = plasma + i * PLASMA_DIMENSIONS;
     memcpy(d, s, pict->linesize[0]);
   }
+#endif
 
-  /*
-  pvx += (float) (rand() % 255) / 128.0; 
-  */
+  rc = redVideoFilterApply(filter, pict->data[0], NULL, pict->linesize[0]);
+  if (rc) goto end;
 
-  copyPalette(pict->data[1], palette_offset); 
-  palette_offset++;
-  palette_offset %= 2048;
+  rc = redVideoFilterPlasmaCopyPalette(filter, pict->data[1]);
+  if (rc) goto end;
+
+  rc = advancePlasma(filter);
+ end:
+  return rc;
 }
 
-static void open_video(AVFormatContext *oc, OutputStream *ost)
+static
+void 
+open_video(
+    AVFormatContext* oc, 
+    OutputStream*    ost
+    )
 {
-  AVCodecContext *c;
+  AVCodecContext* c;
   c = ost->st->codec;
   
-  /* for plasma */
-  initializePlasma();
-
   /* open the codec */
   if (avcodec_open2(c, NULL, NULL) < 0) {
     fprintf(stderr, "could not open codec\n");
@@ -478,7 +473,12 @@ static void open_video(AVFormatContext *oc, OutputStream *ost)
   }
 }
 
-static AVFrame *get_video_frame(OutputStream *ost)
+static
+AVFrame*
+get_video_frame(
+    OutputStream*  ost,
+    RedVideoFilter filter
+    )
 {
   AVCodecContext *c = ost->st->codec;
   /* check if we want to generate more frames */
@@ -500,27 +500,34 @@ static AVFrame *get_video_frame(OutputStream *ost)
 	exit(1);
       }
     }
-    fill_rgb_image(ost->tmp_frame, ost->next_pts, c->width, c->height);
+    fill_rgb_image(ost->tmp_frame, filter);
     sws_scale(ost->sws_ctx, (const uint8_t* const*)ost->tmp_frame->data, ost->tmp_frame->linesize,
 	      0, c->height, ost->frame->data, ost->frame->linesize);
   } else {
-    fill_rgb_image(ost->frame, ost->next_pts, c->width, c->height);
+    fill_rgb_image(ost->frame, filter);
   }
   ost->frame->pts = ost->next_pts++;
   return ost->frame;
 }
+
 /*
  * encode one video frame and send it to the muxer
  * return 1 when encoding is finished, 0 otherwise
  */
-static int write_video_frame(AVFormatContext *oc, OutputStream *ost)
+static 
+int
+write_video_frame(
+    AVFormatContext* oc, 
+    OutputStream*    ost,
+    RedVideoFilter   filter
+    )
 {
   int ret;
   AVCodecContext *c;
   AVFrame *frame;
   int got_packet = 0;
   c = ost->st->codec;
-  frame = get_video_frame(ost);
+  frame = get_video_frame(ost, filter);
   if (oc->oformat->flags & AVFMT_RAWPICTURE) {
     /* a hack to avoid data copy with some raw video muxers */
     AVPacket pkt;
@@ -556,6 +563,7 @@ static int write_video_frame(AVFormatContext *oc, OutputStream *ost)
   }
   return (frame || got_packet) ? 0 : 1;
 }
+
 static void close_stream(AVFormatContext *oc, OutputStream *ost)
 {
   avcodec_close(ost->st->codec);
@@ -564,31 +572,89 @@ static void close_stream(AVFormatContext *oc, OutputStream *ost)
   sws_freeContext(ost->sws_ctx);
   avresample_free(&ost->avr);
 }
-/**************************************************************/
-/* media file output */
-int main(int argc, char **argv)
+
+
+int
+main(
+    int    argc, 
+    char** argv
+    )
 {
-  OutputStream video_st = { 0 }, audio_st = { 0 };
-  const char *filename;
-  AVOutputFormat *fmt;
-  AVFormatContext *oc;
-  int have_video = 0, have_audio = 0;
+  int rc = RED_SUCCESS;
+
+  RedContext rCtx = NULL;
+  
+  OutputStream video_st = { 0 };
+  OutputStream audio_st = { 0 };
+
+  const char*  input_filename = NULL;
+  const char* output_filename = NULL;
+
+  AVOutputFormat*  fmt;
+  AVFormatContext* oc;
+
+  int   have_video = 0,   have_audio = 0;
   int encode_video = 0, encode_audio = 0;
+
+  /* make this configurable */
+  int filter_type = RED_VIDEO_FILTER_TYPE_PLASMA;
+  
+  RedVideoFilter           video_filter = NULL;
+  RedAudioCombiningContext acCtx  = NULL;
+
+  redPaletteSchemaFunction redPaletteSchemaCreator = redPaletteSchemaPurpleHaze;
+  PaletteSchema8x256       palette_schema          = NULL;
+
+  if (argc != 3) {
+    printf("usage: %s <input> <output>\r\n\r\n", argv[0]);
+    return RED_ERR_INVALID_ARGUMENT;
+  }
+  input_filename  = argv[1];
+  output_filename = argv[2]; 
+  (void)input_filename;
+
+  rc = redContextCreateDefault(&rCtx);
+  if (rc) goto end;
+
+  switch(filter_type) {
+    case RED_VIDEO_FILTER_TYPE_PLASMA:
+      rc = redPaletteSchemaCreator(&palette_schema, rCtx);
+      if (rc) goto end;
+    
+      rc = redVideoFilterPlasmaCreate(&video_filter, palette_schema, 600, 600,
+				    PLASMA_GRAIN, PLASMA_SEED, rCtx);
+      if (rc) goto end;
+  
+      /* not reeeaaally necessary, but good for memory */
+      rc = redPaletteSchemaDestroy(&palette_schema);
+      if (rc) goto end;
+
+      break;
+    case RED_VIDEO_FILTER_TYPE_LEGO:
+      rc = RED_NOT_IMPLEMENTED;
+      goto end;
+      
+      break;
+    case RED_VIDEO_FILTER_TYPE_REPLACE:
+      rc = RED_NOT_IMPLEMENTED;
+      goto end;
+
+      break;
+    case RED_VIDEO_FILTER_TYPE_CYPHER:
+      rc = RED_NOT_IMPLEMENTED;
+      goto end;
+
+      break;
+    default:
+      rc = RED_ERR_INVALID_ARGUMENT;
+      goto end;
+  }
+  
   /* Initialize libavcodec, and register all codecs and formats. */
   av_register_all();
 
-    
-  if (argc != 2) {
-    printf("usage: %s output_file\n"
-	   "API example program to output a media file with libavformat.\n"
-	   "The output format is automatically guessed according to the file extension.\n"
-	   "Raw images can also be output by using '%%d' in the filename\n"
-	   "\n", argv[0]);
-    return 1;
-  }
-  filename = argv[1];
   /* Autodetect the output format from the name. default is MPEG. */
-  fmt = av_guess_format(NULL, filename, NULL);
+  fmt = av_guess_format(NULL, output_filename, NULL);
   if (!fmt) {
     printf("Could not deduce output format from file extension: using MPEG.\n");
     fmt = av_guess_format("mpeg", NULL, NULL);
@@ -597,6 +663,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "Could not find suitable output format\n");
     return 1;
   }
+
   /* Allocate the output media context. */
   oc = avformat_alloc_context();
   if (!oc) {
@@ -604,7 +671,8 @@ int main(int argc, char **argv)
     return 1;
   }
   oc->oformat = fmt;
-  snprintf(oc->filename, sizeof(oc->filename), "%s", filename);
+  snprintf(oc->filename, sizeof(oc->filename), "%s", output_filename);
+
   /* Add the audio and video streams using the default format codecs
    * and initialize the codecs. */
   if (fmt->video_codec != AV_CODEC_ID_NONE) {
@@ -617,46 +685,65 @@ int main(int argc, char **argv)
     have_audio = 1;
     encode_audio = 1;
   }
+
   /* Now that all the parameters are set, we can open the audio and
    * video codecs and allocate the necessary encode buffers. */
   if (have_video)
     open_video(oc, &video_st);
   if (have_audio)
     open_audio(oc, &audio_st);
-  av_dump_format(oc, 0, filename, 1);
+
+  av_dump_format(oc, 0, output_filename, 1);
   /* open the output file, if needed */
   if (!(fmt->flags & AVFMT_NOFILE)) {
-    if (avio_open(&oc->pb, filename, AVIO_FLAG_WRITE) < 0) {
-      fprintf(stderr, "Could not open '%s'\n", filename);
+    if (avio_open(&oc->pb, output_filename, AVIO_FLAG_WRITE) < 0) {
+      fprintf(stderr, "Could not open '%s'\n", output_filename);
       return 1;
     }
   }
+
   /* Write the stream header, if any. */
   avformat_write_header(oc, NULL);
+
   while (encode_video || encode_audio) {
     /* select the stream to encode */
     if (encode_video &&
 	(!encode_audio || av_compare_ts(video_st.next_pts, video_st.st->codec->time_base,
 					audio_st.next_pts, audio_st.st->codec->time_base) <= 0)) {
-      encode_video = !write_video_frame(oc, &video_st);
+      encode_video = !write_video_frame(oc, &video_st, video_filter);
     } else {
-      encode_audio = !process_audio_stream(oc, &audio_st);
+      encode_audio = !process_audio_stream(acCtx, oc, &audio_st);
     }
   }
+
   /* Write the trailer, if any. The trailer must be written before you
    * close the CodecContexts open when you wrote the header; otherwise
    * av_write_trailer() may try to use memory that was freed on
    * av_codec_close(). */
   av_write_trailer(oc);
+
   /* Close each codec. */
   if (have_video)
     close_stream(oc, &video_st);
   if (have_audio)
     close_stream(oc, &audio_st);
+
+  /* Close the output file. */
   if (!(fmt->flags & AVFMT_NOFILE))
-    /* Close the output file. */
     avio_close(oc->pb);
   /* free the stream */
   avformat_free_context(oc);
-  return 0;
+
+ end:
+  if (rCtx) {
+    redAudioCombiningContextDestroy(&acCtx);
+
+    if (palette_schema)
+      redPaletteSchemaDestroy(&palette_schema);
+
+    redVideoFilterDestroy(&video_filter);
+    redContextDestroy(&rCtx);
+  }
+
+  return RED_SUCCESS;
 }

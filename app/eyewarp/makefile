@@ -5,6 +5,6 @@
 #
 # $Id: makefile 2 2010-03-29 03:41:56Z jason $
 
-LIBS := eyewarp avformat avcodec avresample avutil swresample swscale m z pthread
+LIBS := eyewarp red avformat avcodec avresample avutil swresample swscale xvidcore x264 mp3lame m z pthread
 
 include ../app.mk

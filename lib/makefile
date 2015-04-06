@@ -9,7 +9,7 @@ STATICLIBS := eyewarp
 
 # define module directories to source objects from when building
 # the above libs
-eyewarp := src/common src/curve src/filter src/fractal src/crypto
+eyewarp := src/common src/curve src/filter src/fractal src/crypto src/audio
 
 include $(RUMPATH)/target.mk
 include $(RUMPATH)/lib.mk
