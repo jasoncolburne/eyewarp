@@ -1,7 +1,7 @@
 #ifndef __VIDEO_FILTER_H__
 #define __VIDEO_FILTER_H__
 
-#include "he_context.h"
+#include "red_context.h"
 #include "fractal.h"
 
 struct _RedVideoFilter;

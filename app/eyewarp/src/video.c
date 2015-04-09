@@ -2,7 +2,7 @@
 
 #include <stdio.h> /* temporary */
 
-#include "he_memory.h"
+#include "red_memory.h"
 #include "eyewarp.h"
 #include "video_filter.h"
 

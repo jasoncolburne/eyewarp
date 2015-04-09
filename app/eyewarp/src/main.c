@@ -40,7 +40,7 @@
 #include "libswscale/swscale.h"
 
 /* pkg headers */
-#include "he_context.h"
+#include "red_context.h"
 
 /* local headers */
 #include "eyewarp.h"

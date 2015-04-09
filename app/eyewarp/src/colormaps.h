@@ -3,8 +3,8 @@
 #ifndef __COLORMAPS_H__
 #define __COLORMAPS_H__
 
+#include "red_context.h"
 #include "fractal.h"
-#include "he_context.h"
 
 typedef int (*redPaletteSchemaFunction)(PaletteSchema8x256*, RedContext);
 
