@@ -1,0 +1,5 @@
+redrum/
+pkg/
+**/obj/
+**/release/
+**/debug/
