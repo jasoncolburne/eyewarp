@@ -4,8 +4,8 @@
  * All rights reserved.
  */
 
-#include "he_return.h"
-#include "he_memory.h"
+#include "red_return.h"
+#include "red_memory.h"
 
 #include "red_audio.h"
 #include "_red_audio.h"

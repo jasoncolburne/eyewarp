@@ -7,7 +7,7 @@
 #ifndef ___RED_AUDIO_H__
 #define ___RED_AUDIO_H__
 
-#include "he_context.h"
+#include "red_context.h"
 
 struct _RedAudioSignalContext {
   red_u32    format;

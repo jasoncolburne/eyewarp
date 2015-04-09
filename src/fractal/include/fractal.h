@@ -7,8 +7,8 @@
 #ifndef __FRACTAL_H__
 #define __FRACTAL_H__
 
-#include "he_type.h"
-#include "he_context.h"
+#include "red_type.h"
+#include "red_context.h"
 
 struct _PaletteSchema8x256 {
   size_t   count;

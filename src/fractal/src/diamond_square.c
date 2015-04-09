@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <math.h>
 
-#include "he_memory.h"
+#include "red_memory.h"
 
 #include "fractal.h"
 
